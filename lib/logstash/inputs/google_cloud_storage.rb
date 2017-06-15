@@ -136,12 +136,22 @@ class LogStash::Inputs::GoogleCloudStorage < LogStash::Inputs::Base
 
 
   public
-  def backup_to_bucket(object)
+  def backup_to_bucket(filename)
     unless @backup_to_bucket.nil?
-      backup_key = "#{@backup_add_prefix}#{object.key}"
-      @backup_bucket.object(backup_key).copy_from(:copy_source => "#{object.bucket_name}/#{object.key}")
+      backup_key = "#{@backup_add_prefix}#{filename}"
+
+      @logger.info ("bck_up object " + backup_key)
+
+      result = @client.execute(
+          api_method: @gcs.objects.copy,
+          parameters: {destinationBucket: @backup_to_bucket, destinationObject:backup_key, sourceBucket: @bucket, sourceObject: filename }
+      )
+
       if @delete
-        object.delete()
+        result = @client.execute(
+            api_method: @gcs.objects.delete,
+            parameters: { bucket: @bucket, object: filename }
+        )
       end
     end
   end
@@ -356,9 +366,9 @@ class LogStash::Inputs::GoogleCloudStorage < LogStash::Inputs::Base
       if process_local_log(queue, filename, key)
         @logger.info(" UPDATED " + object.data['updated'].to_s )
         lastmod = object.data['updated']
-        backup_to_bucket(object)
+        backup_to_bucket(key)
         backup_to_dir(filename)
-        delete_file_from_bucket(object)
+        delete_file_from_bucket(key)
         FileUtils.remove_entry_secure(filename, true)
         sincedb.write(lastmod)
 
