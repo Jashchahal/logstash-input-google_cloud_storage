@@ -34,10 +34,10 @@ class LogStash::Inputs::GoogleCloudStorage < LogStash::Inputs::Base
   # Should be a path with filename not just a directory.
   config :sincedb_path, :validate => :string, :default => nil
 
-  # Name of a S3 bucket to backup processed files to.
+  # Name of a GCS bucket to backup processed files to.
   config :backup_to_bucket, :validate => :string, :default => nil
 
-  # Append a prefix to the key (full path including file name in s3) after processing.
+  # Append a prefix to the key (full path including file name in gcs) after processing.
   # If backing up to another (or the same) bucket, this effectively lets you
   # choose a new 'folder' to place the files in
   config :backup_add_prefix, :validate => :string, :default => nil
@@ -69,9 +69,9 @@ class LogStash::Inputs::GoogleCloudStorage < LogStash::Inputs::Base
     require "google/api_client"
     require "openssl"
 
-    @logger.info("Registering GCS input", :bucket => @bucket, :project => @project, :keyfile => @keyfile)
+    @logger.debug("Registering GCS input", :bucket => @bucket, :project => @project, :keyfile => @keyfile)
     # initialize_google_client
-
+    @logger.info ("\n===========================GCS INPUT PLUG-IN===========================")
     @client = Google::APIClient.new(:application_name =>
                                         'Logstash Google Cloud Storage input plugin',
                                     :application_version => '0.1')
@@ -82,9 +82,6 @@ class LogStash::Inputs::GoogleCloudStorage < LogStash::Inputs::Base
                                                          key)
     @client.authorization = service_account.authorize
     @gcs = @client.discovered_api('storage', 'v1')
-
-
-    #list_new_files
 
 
     unless @backup_to_dir.nil?
@@ -105,14 +102,14 @@ class LogStash::Inputs::GoogleCloudStorage < LogStash::Inputs::Base
 
   public
   def list_new_files
-    @logger.debug("GCS input: Polling")
+
+
+    @logger.debug("GCS input: Polling new objects from bucket "+ @bucket)
 
     objects = @client.execute(
         api_method: @gcs.objects.list,
         parameters: {bucket: @bucket}
     )
-
-  #  @logger.info(objects.body)
 
     logFiles = {}
 
@@ -121,8 +118,8 @@ class LogStash::Inputs::GoogleCloudStorage < LogStash::Inputs::Base
       unless ignore_filename?(file.name)
         if sincedb.newer?(file.updated)
           logFiles[file.name] = file.updated
-          @logger.debug("GCS input: Adding to objects[]", :name => file.name)
-          @logger.debug("objects[] length is: ", :length => logFiles.length)
+          @logger.info("GCS input: Adding to objects[]", :name => file.name)
+          @logger.debug("GCS input: objects[] length is: ", :length => logFiles.length)
         end
       end
 
@@ -140,7 +137,7 @@ class LogStash::Inputs::GoogleCloudStorage < LogStash::Inputs::Base
     unless @backup_to_bucket.nil?
       backup_key = "#{@backup_add_prefix}#{filename}"
 
-      @logger.info ("bck_up object " + backup_key)
+      @logger.debug ("GCS input: bck_up object " + backup_key)
 
       result = @client.execute(
           api_method: @gcs.objects.copy,
@@ -172,7 +169,7 @@ class LogStash::Inputs::GoogleCloudStorage < LogStash::Inputs::Base
       if stop?
         break
       else
-        @logger.info("gcs input processing", :bucket => @bucket, :filename => filename)
+        @logger.debug("GCS input: processing ", :bucket => @bucket, :filename => filename)
         process_log(queue, filename)
       end
     end
@@ -197,7 +194,7 @@ class LogStash::Inputs::GoogleCloudStorage < LogStash::Inputs::Base
   # @param [String] Which file to read from
   # @return [Boolean] True if the file was completely read, false otherwise.
   def process_local_log(queue, filename, key)
-    @logger.info('Processing file', :filename => filename)
+    @logger.debug('GCS input: processing file ', :filename => filename)
     metadata = {}
     # Currently codecs operates on bytes instead of stream.
     # So all IO stuff: decompression, reading need to be done in the actual
@@ -218,19 +215,16 @@ class LogStash::Inputs::GoogleCloudStorage < LogStash::Inputs::Base
         # The line need to go through the codecs to replace
         # unknown bytes in the log stream before doing a regexp match or
         # you will get a `Error: invalid byte sequence in UTF-8'
-        if event_is_metadata?(event)
-          @logger.debug('Event is metadata, updating the current cloudfront metadata', :event => event)
-          update_metadata(metadata, event)
-        else
+        #if event_is_metadata?(event)
+        #  @logger.debug('Event is metadata, updating the current cloudfront metadata', :event => event)
+        #  update_metadata(metadata, event)
+        #else
+
+          event.set("[@metadata][gcs]", { "key" => key })
+          event.set("[@metadata][host]", @host)
           decorate(event)
-
-          event.set("cloudfront_version", metadata[:cloudfront_version]) unless metadata[:cloudfront_version].nil?
-          event.set("cloudfront_fields", metadata[:cloudfront_fields]) unless metadata[:cloudfront_fields].nil?
-
-          event.set("[@metadata][s3]", { "key" => key })
-
           queue << event
-        end
+        ##end
       end
     end
 
@@ -309,10 +303,10 @@ class LogStash::Inputs::GoogleCloudStorage < LogStash::Inputs::Base
   private
   def sincedb
     @sincedb ||= if @sincedb_path.nil?
-                   @logger.info("Using default generated file for the sincedb", :filename => sincedb_file)
+                   @logger.debug("Using default generated file for the sincedb", :filename => sincedb_file)
                    SinceDB::File.new(sincedb_file)
                  else
-                   @logger.info("Using the provided sincedb_path",
+                   @logger.debug("Using the provided sincedb_path",
                                 :sincedb_path => @sincedb_path)
                    SinceDB::File.new(@sincedb_path)
                  end
@@ -343,8 +337,6 @@ class LogStash::Inputs::GoogleCloudStorage < LogStash::Inputs::Base
   private
   def process_log(queue, key)
 
-    @logger.info("going to get and download file "+ key)
-
     object = @client.execute(
         api_method: @gcs.objects.get,
         parameters: {bucket: @bucket, object: key}
@@ -355,16 +347,12 @@ class LogStash::Inputs::GoogleCloudStorage < LogStash::Inputs::Base
         parameters: {bucket: @bucket, object: key, alt: 'media'}
     )
 
-    # @logger.info(" after read " + object.body)
-
 
     filename = File.join(temporary_directory, File.basename(key))
-    @logger.info(" generated filename " + filename)
 
     if download_remote_file(objectdata.body, filename)
-      @logger.info(" downloaded")
+
       if process_local_log(queue, filename, key)
-        @logger.info(" UPDATED " + object.data['updated'].to_s )
         lastmod = object.data['updated']
         backup_to_bucket(key)
         backup_to_dir(filename)
@@ -381,12 +369,11 @@ class LogStash::Inputs::GoogleCloudStorage < LogStash::Inputs::Base
   private
   # Stream the remove file to the local disk
   #
-  # @param [S3Object] Reference to the remove S3 objec to download
+  # @param [GCS_OBJECT] Data from GCS object to download
   # @param [String] The Temporary filename to stream to.
   # @return [Boolean] True if the file was completely downloaded
   def download_remote_file(remote_object, local_filename)
     completed = false
-    #@logger.info("gcs input: Download remote file", :remote_key => remote_object.name, :local_filename => local_filename)
 
     ##TODO NEED CHANGE IN WRITE LOGIC TO AVOID MEMORY ISSUES
 
@@ -403,10 +390,7 @@ class LogStash::Inputs::GoogleCloudStorage < LogStash::Inputs::Base
     end
   end
 
-  private
-  def get_s3object
-    s3 = Aws::S3::Resource.new(aws_options_hash)
-  end
+
 
   private
   module SinceDB
@@ -416,7 +400,7 @@ class LogStash::Inputs::GoogleCloudStorage < LogStash::Inputs::Base
       end
 
       def newer?(date)
-        date > read
+         date.to_i > read.to_i
       end
 
       def read
